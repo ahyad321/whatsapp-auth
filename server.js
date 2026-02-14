@@ -73,7 +73,7 @@ app.post("/send-otp", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY OTP + CUSTOMER LOGIC
+   VERIFY OTP + CUSTOMER RESOLUTION
 ================================= */
 
 app.post("/verify-otp", async (req, res) => {
@@ -95,30 +95,21 @@ app.post("/verify-otp", async (req, res) => {
     if (record.otp !== otp)
       return res.status(400).json({ error: "Invalid OTP" });
 
-    /* ============================
-       SHOPIFY CUSTOMER SEARCH
-    ============================= */
-
     let customer = null;
 
-    // Search without +
-    const search1 = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:${cleanPhone}`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
-        }
-      }
-    );
+    /* ============================
+       TRY CREATE FIRST
+    ============================= */
 
-    if (search1.data.customers.length > 0) {
-      customer = search1.data.customers[0];
-    }
-
-    // Search with +
-    if (!customer) {
-      const search2 = await axios.get(
-        `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:+${cleanPhone}`,
+    try {
+      const create = await axios.post(
+        `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json`,
+        {
+          customer: {
+            phone: "+" + cleanPhone,
+            tags: "whatsapp_auth"
+          }
+        },
         {
           headers: {
             "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
@@ -126,25 +117,15 @@ app.post("/verify-otp", async (req, res) => {
         }
       );
 
-      if (search2.data.customers.length > 0) {
-        customer = search2.data.customers[0];
-      }
-    }
+      customer = create.data.customer;
 
-    /* ============================
-       CREATE IF NOT EXISTS
-    ============================= */
+    } catch (createErr) {
 
-    if (!customer) {
-      try {
-        const create = await axios.post(
-          `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json`,
-          {
-            customer: {
-              phone: "+" + cleanPhone,
-              tags: "whatsapp_auth"
-            }
-          },
+      // If duplicate phone → fetch manually
+      if (createErr.response?.data?.errors?.phone) {
+
+        const allCustomers = await axios.get(
+          `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json?limit=250`,
           {
             headers: {
               "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
@@ -152,30 +133,13 @@ app.post("/verify-otp", async (req, res) => {
           }
         );
 
-        customer = create.data.customer;
+        customer = allCustomers.data.customers.find(c =>
+          c.phone === "+" + cleanPhone ||
+          c.phone === cleanPhone
+        );
 
-      } catch (createErr) {
-
-        // If duplicate phone error
-        if (createErr.response?.data?.errors?.phone) {
-
-          const allCustomers = await axios.get(
-            `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json?limit=250`,
-            {
-              headers: {
-                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
-              }
-            }
-          );
-
-          customer = allCustomers.data.customers.find(c =>
-            c.phone === "+" + cleanPhone ||
-            c.phone === cleanPhone
-          );
-
-        } else {
-          throw createErr;
-        }
+      } else {
+        throw createErr;
       }
     }
 
@@ -183,7 +147,7 @@ app.post("/verify-otp", async (req, res) => {
       return res.status(500).json({ error: "Customer resolution failed" });
 
     /* ============================
-       GENERATE SESSION TOKEN
+       GENERATE JWT
     ============================= */
 
     const token = jwt.sign(
@@ -195,7 +159,7 @@ app.post("/verify-otp", async (req, res) => {
       { expiresIn: "7d" }
     );
 
-    // Delete OTP AFTER success
+    // Delete OTP ONLY after full success
     delete otpStore[cleanPhone];
 
     res.json({
@@ -233,7 +197,7 @@ app.get("/me", async (req, res) => {
 
     res.json(response.data.customer);
 
-  } catch {
+  } catch (err) {
     res.status(401).json({ error: "Invalid session" });
   }
 });
