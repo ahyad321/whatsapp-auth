@@ -1,89 +1,51 @@
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 
-/* ================================
-   MIDDLEWARE
-================================ */
-
-app.use(cors({
-  origin: "*", // later restrict to your domain
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
-
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-console.log("SERVER STARTING...");
+/* ===============================
+   ENV VARIABLES (SET IN RENDER)
+================================= */
 
-/* ================================
-   ENV VARIABLES
-================================ */
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 
-const BOTBIZ_API_URL = "https://dash.botbiz.io/api/v1/whatsapp/send/template";
+const BOTBIZ_API_URL = process.env.BOTBIZ_API_URL;
 const BOTBIZ_API_TOKEN = process.env.BOTBIZ_API_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const TEMPLATE_ID = process.env.TEMPLATE_ID;
 
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
+const JWT_SECRET = process.env.JWT_SECRET;
 
-/* ================================
-   TEMP OTP STORE (in-memory)
-================================ */
+/* =============================== */
 
 const otpStore = {};
 
-/* ================================
+/* ===============================
    ROOT CHECK
-================================ */
+================================= */
 
 app.get("/", (req, res) => {
   res.send("OTP BACKEND LIVE");
 });
 
-/* ================================
-   TEST SHOPIFY CONNECTION
-================================ */
-
-app.get("/test-shopify", async (req, res) => {
-  try {
-    const response = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2026-01/shop.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    res.json(response.data);
-
-  } catch (error) {
-    console.log("SHOPIFY ERROR:", error.response?.data || error.message);
-    res.status(500).json({ error: "Shopify connection failed" });
-  }
-});
-
-/* ================================
+/* ===============================
    SEND OTP
-================================ */
+================================= */
 
 app.post("/send-otp", async (req, res) => {
   try {
     const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: "Phone required" });
 
-    if (!phone) {
-      return res.status(400).json({ error: "Phone required" });
-    }
-
-    const cleanPhone = phone.replace(/\+/g, "").replace(/\s/g, "");
-
+    const cleanPhone = phone.replace(/\D/g, "");
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
     otpStore[cleanPhone] = {
@@ -104,87 +66,180 @@ app.post("/send-otp", async (req, res) => {
 
     res.json({ success: true });
 
-  } catch (error) {
-    console.log("BOTBIZ ERROR:", error.response?.data || error.message);
-    res.status(500).json({ error: "Failed to send OTP" });
+  } catch (err) {
+    console.log("SEND OTP ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "OTP send failed" });
   }
 });
 
-/* ================================
-   VERIFY OTP + CREATE CUSTOMER
-================================ */
+/* ===============================
+   VERIFY OTP + CUSTOMER LOGIC
+================================= */
 
 app.post("/verify-otp", async (req, res) => {
   try {
     const { phone, otp } = req.body;
 
-    if (!phone || !otp) {
-      return res.status(400).json({ error: "Phone and OTP required" });
-    }
+    if (!phone || !otp)
+      return res.status(400).json({ error: "Phone & OTP required" });
 
-    const cleanPhone = phone.replace(/\+/g, "").replace(/\s/g, "");
+    const cleanPhone = phone.replace(/\D/g, "");
     const record = otpStore[cleanPhone];
 
-    if (!record) {
+    if (!record)
       return res.status(400).json({ error: "No OTP found" });
-    }
 
-    if (Date.now() > record.expiresAt) {
-      delete otpStore[cleanPhone];
+    if (Date.now() > record.expiresAt)
       return res.status(400).json({ error: "OTP expired" });
-    }
 
-    if (record.otp !== otp) {
+    if (record.otp !== otp)
       return res.status(400).json({ error: "Invalid OTP" });
+
+    /* ============================
+       SHOPIFY CUSTOMER SEARCH
+    ============================= */
+
+    let customer = null;
+
+    // Search without +
+    const search1 = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:${cleanPhone}`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    if (search1.data.customers.length > 0) {
+      customer = search1.data.customers[0];
     }
 
+    // Search with +
+    if (!customer) {
+      const search2 = await axios.get(
+        `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:+${cleanPhone}`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+          }
+        }
+      );
+
+      if (search2.data.customers.length > 0) {
+        customer = search2.data.customers[0];
+      }
+    }
+
+    /* ============================
+       CREATE IF NOT EXISTS
+    ============================= */
+
+    if (!customer) {
+      try {
+        const create = await axios.post(
+          `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json`,
+          {
+            customer: {
+              phone: "+" + cleanPhone,
+              tags: "whatsapp_auth"
+            }
+          },
+          {
+            headers: {
+              "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+            }
+          }
+        );
+
+        customer = create.data.customer;
+
+      } catch (createErr) {
+
+        // If duplicate phone error
+        if (createErr.response?.data?.errors?.phone) {
+
+          const allCustomers = await axios.get(
+            `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json?limit=250`,
+            {
+              headers: {
+                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+              }
+            }
+          );
+
+          customer = allCustomers.data.customers.find(c =>
+            c.phone === "+" + cleanPhone ||
+            c.phone === cleanPhone
+          );
+
+        } else {
+          throw createErr;
+        }
+      }
+    }
+
+    if (!customer)
+      return res.status(500).json({ error: "Customer resolution failed" });
+
+    /* ============================
+       GENERATE SESSION TOKEN
+    ============================= */
+
+    const token = jwt.sign(
+      {
+        customer_id: customer.id,
+        phone: cleanPhone
+      },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    // Delete OTP AFTER success
     delete otpStore[cleanPhone];
 
-    // 1️⃣ Check if customer exists
-    const search = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:+${cleanPhone}`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+    res.json({
+      success: true,
+      token
+    });
 
-    if (search.data.customers.length > 0) {
-      return res.json({ success: true, message: "Customer exists" });
-    }
-
-    // 2️⃣ Create new customer
-    await axios.post(
-      `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json`,
-      {
-        customer: {
-          phone: "+" + cleanPhone,
-          verified_email: false,
-          tags: "otp-user"
-        }
-      },
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    return res.json({ success: true, message: "Customer created" });
-
-  } catch (error) {
-    console.log("VERIFY ERROR:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Verification failed" });
+  } catch (err) {
+    console.log("VERIFY ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
-/* ================================
-   START SERVER
-================================ */
+/* ===============================
+   PROTECTED ROUTE
+================================= */
+
+app.get("/me", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ error: "No token provided" });
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const response = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/${decoded.customer_id}.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    res.json(response.data.customer);
+
+  } catch {
+    res.status(401).json({ error: "Invalid session" });
+  }
+});
+
+/* =============================== */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log("🚀 Server running on port " + PORT);
 });
