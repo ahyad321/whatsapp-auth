@@ -10,9 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ===============================
-   ENV VARIABLES (SET IN RENDER)
-================================= */
+
 
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
