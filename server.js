@@ -10,8 +10,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-
-
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 
@@ -22,12 +20,10 @@ const TEMPLATE_ID = process.env.TEMPLATE_ID;
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-/* =============================== */
-
 const otpStore = {};
 
 /* ===============================
-   ROOT CHECK
+   ROOT
 ================================= */
 
 app.get("/", (req, res) => {
@@ -71,7 +67,7 @@ app.post("/send-otp", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY OTP + CUSTOMER RESOLUTION
+   VERIFY OTP
 ================================= */
 
 app.post("/verify-otp", async (req, res) => {
@@ -93,16 +89,14 @@ app.post("/verify-otp", async (req, res) => {
     if (record.otp !== otp)
       return res.status(400).json({ error: "Invalid OTP" });
 
-    let customer = null;
-
-    // Use generated email for stable identity
     const generatedEmail = `${cleanPhone}@whatsapp.login`;
 
-    /* ============================
-       SEARCH BY EMAIL (RELIABLE)
-    ============================= */
+    let customer = null;
 
-    const search = await axios.get(
+    /* -----------------------------
+       1️⃣ Search by generated email
+    -------------------------------- */
+    const emailSearch = await axios.get(
       `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=email:${generatedEmail}`,
       {
         headers: {
@@ -111,14 +105,31 @@ app.post("/verify-otp", async (req, res) => {
       }
     );
 
-    if (search.data.customers.length > 0) {
-      customer = search.data.customers[0];
+    if (emailSearch.data.customers.length > 0) {
+      customer = emailSearch.data.customers[0];
     }
 
-    /* ============================
-       CREATE IF NOT EXISTS
-    ============================= */
+    /* -----------------------------
+       2️⃣ If not found, search by phone
+    -------------------------------- */
+    if (!customer) {
+      const phoneSearch = await axios.get(
+        `https://${SHOPIFY_STORE}/admin/api/2026-01/customers/search.json?query=phone:+${cleanPhone}`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+          }
+        }
+      );
 
+      if (phoneSearch.data.customers.length > 0) {
+        customer = phoneSearch.data.customers[0];
+      }
+    }
+
+    /* -----------------------------
+       3️⃣ If still not found, create
+    -------------------------------- */
     if (!customer) {
       const create = await axios.post(
         `https://${SHOPIFY_STORE}/admin/api/2026-01/customers.json`,
@@ -142,10 +153,9 @@ app.post("/verify-otp", async (req, res) => {
     if (!customer)
       return res.status(500).json({ error: "Customer resolution failed" });
 
-    /* ============================
-       GENERATE JWT SESSION
-    ============================= */
-
+    /* -----------------------------
+       4️⃣ Generate JWT
+    -------------------------------- */
     const token = jwt.sign(
       {
         customer_id: customer.id,
@@ -169,7 +179,7 @@ app.post("/verify-otp", async (req, res) => {
 });
 
 /* ===============================
-   PROTECTED ROUTE
+   CUSTOMER PROFILE
 ================================= */
 
 app.get("/me", async (req, res) => {
@@ -196,26 +206,11 @@ app.get("/me", async (req, res) => {
     res.status(401).json({ error: "Invalid session" });
   }
 });
-app.get("/test-shopify", async (req, res) => {
-  try {
-    const response = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2026-01/shop.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
-        }
-      }
-    );
 
-    res.json(response.data);
+/* ===============================
+   FETCH ORDERS
+================================= */
 
-  } catch (err) {
-    console.log("SHOP TEST ERROR:", err.response?.data || err.message);
-    res.status(500).json({ error: "Shopify connection failed" });
-  }
-});
-
-/* =============================== */
 app.get("/my-orders", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -237,9 +232,12 @@ app.get("/my-orders", async (req, res) => {
     res.json(orders.data.orders);
 
   } catch (err) {
+    console.log("ORDER FETCH ERROR:", err.response?.data || err.message);
     res.status(401).json({ error: "Failed to fetch orders" });
   }
 });
+
+/* =============================== */
 
 app.listen(PORT, () => {
   console.log("🚀 Server running on port " + PORT);
