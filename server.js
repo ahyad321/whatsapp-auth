@@ -216,6 +216,30 @@ app.get("/test-shopify", async (req, res) => {
 });
 
 /* =============================== */
+app.get("/my-orders", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ error: "No token" });
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const orders = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2026-01/orders.json?customer_id=${decoded.customer_id}&status=any`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    res.json(orders.data.orders);
+
+  } catch (err) {
+    res.status(401).json({ error: "Failed to fetch orders" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log("🚀 Server running on port " + PORT);
