@@ -196,6 +196,24 @@ app.get("/me", async (req, res) => {
     res.status(401).json({ error: "Invalid session" });
   }
 });
+app.get("/test-shopify", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2026-01/shop.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    res.json(response.data);
+
+  } catch (err) {
+    console.log("SHOP TEST ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "Shopify connection failed" });
+  }
+});
 
 /* =============================== */
 
